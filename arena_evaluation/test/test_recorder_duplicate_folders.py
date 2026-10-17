@@ -38,6 +38,7 @@ def _stub_modules(base_dir):
     rospy.Subscriber = FakeSubscriber
     rospy.get_namespace = lambda: NAMESPACE
     rospy.get_param = lambda name, default=None: default
+    rospy.get_rostime = lambda: types.SimpleNamespace(secs=0, nsecs=0)
     rospy_core = types.ModuleType("rospy.core")
     rospy_core.traceback = __import__("traceback")
     rospy.core = rospy_core

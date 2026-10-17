@@ -7,11 +7,9 @@ import numpy as np
 import csv
 import os
 import math
-import re
 import threading
 from rosgraph_msgs.msg import Clock
 from rospy.core import traceback
-import rostopic
 import rospkg
 from datetime import datetime
 import yaml
@@ -46,7 +44,9 @@ class DataCollector:
             return
 
         self.full_topic_name = topic[1]
-        self.data = None
+        # held message and its receive time in ns, replaced together so a
+        # row never pairs new data with an old receive time
+        self.sample = (None, None)
 
         print(topic[0])
 
@@ -57,14 +57,18 @@ class DataCollector:
         
         self.data = msg_scenario_reset.data
 
+    def hold(self, data):
+        stamp = rospy.get_rostime()
+        self.sample = (data, stamp.secs * 10**9 + stamp.nsecs)
+
     def laserscan_callback(self, msg_laserscan: LaserScan):
-        self.data = [msg_laserscan.range_max if math.isnan(val) else round(val, 3) for val in msg_laserscan.ranges]
+        self.hold([msg_laserscan.range_max if math.isnan(val) else round(val, 3) for val in msg_laserscan.ranges])
 
     def odometry_callback(self, msg_odometry: Odometry):
         pose3d = msg_odometry.pose.pose
         twist = msg_odometry.twist.twist
 
-        self.data = {
+        self.hold({
             "position": [
                 round(val, 3) for val in [
                     pose3d.position.x,
@@ -86,19 +90,19 @@ class DataCollector:
                     twist.angular.z
                 ]
             ]
-        }
+        })
 
     def action_callback(self, msg_action: Twist): # variables will be written to csv whenever an action is published
-        self.data = [
+        self.hold([
             round(val, 3) for val in [
                 msg_action.linear.x,
                 msg_action.linear.y,
                 msg_action.angular.z
             ]
-        ]
+        ])
 
     def pedsim_callback(self, msg_pedsim: pedsim_msgs.PedsimAgentsDataframe):
-        self.data = [
+        self.hold([
             Pedestrian(
                 id = agent.id,
                 type = agent.type,
@@ -109,12 +113,15 @@ class DataCollector:
             )._asdict()
             for agent
             in msg_pedsim.agent_states
-        ]
+        ])
 
     def get_data(self):
+        data, msg_time = self.sample
+
         return (
             self.full_topic_name,
-            self.data 
+            data,
+            msg_time
         )
 
     def shutdown(self):
@@ -139,26 +146,8 @@ class Recorder:
         
         self.write_params()
 
-        topics_to_monitor = self.get_topics_to_monitor()
-
-        topics = rostopic.get_topic_list()
-        published_topics = topics[0]
-
-        topic_matcher = re.compile(f"({'|'.join([t[0] for t in topics_to_monitor])})$")
-
-        topics_to_sub = []
-
-        for t in published_topics:
-            topic_name = t[0]
-
-            match = re.search(topic_matcher, topic_name)
-
-            if not match: 
-                continue
-
-            topics_to_sub.append([topic_name, *self.get_class_for_topic_name(topic_name)])
-
-            # topics_to_sub.append([topic_name, *[t for t in topics_to_monitor if t[0] == match.group()][0]])
+        # subscribe by name, whether or not the topic is published yet
+        topics_to_sub = self.get_topics_to_monitor()
 
         self.data_collectors = []
 
@@ -166,7 +155,7 @@ class Recorder:
             self.data_collectors.append(DataCollector(topic))
             self.write_data(
                 topic[1], [
-                    "time", "data"
+                    "time", "data", "msg_time"
                 ],
                 mode="w"
             )
@@ -226,9 +215,9 @@ class Recorder:
         self.current_time = current_simulation_action_time
 
         for collector in self.data_collectors:
-            topic_name, data = collector.get_data()
+            topic_name, data, msg_time = collector.get_data()
             
-            self.write_data(topic_name, [self.current_time, data])
+            self.write_data(topic_name, [self.current_time, data, msg_time])
         
         self.write_data("episode", [self.current_time, self.current_episode])
         self.write_data("start_goal", [
@@ -241,23 +230,13 @@ class Recorder:
         with open(self.base_dir + "/data_recorder_config.yaml") as file:
             return yaml.safe_load(file)
 
-    def get_class_for_topic_name(self, topic_name):
-        if "/scan" in topic_name:
-            return ["scan", LaserScan]
-        if "/odom" in topic_name:
-            return ["odom", Odometry]
-        if "/cmd_vel" in topic_name:
-            return ["cmd_vel", Twist]
-        if "/pedsim_agents_data" in topic_name:
-            return ["pedsim_agents_data", pedsim_msgs.PedsimAgentsDataframe]
-
     def get_topics_to_monitor(self):
+        # [topic name, csv file name, message class]
         return [
-            (os.path.join(rospy.get_namespace(), "scan"), LaserScan),
-            (os.path.join(rospy.get_namespace(), "scenario_reset"), Int16),
-            (os.path.join(rospy.get_namespace(), "odom"), Odometry),
-            (os.path.join(rospy.get_namespace(), "cmd_vel"), Twist),
-            ("/pedsim_simulator/pedsim_agents_data", pedsim_msgs.PedsimAgentsDataframe)
+            [os.path.join(rospy.get_namespace(), "scan"), "scan", LaserScan],
+            [os.path.join(rospy.get_namespace(), "odom"), "odom", Odometry],
+            [os.path.join(rospy.get_namespace(), "cmd_vel"), "cmd_vel", Twist],
+            ["/pedsim_simulator/pedsim_agents_data", "pedsim_agents_data", pedsim_msgs.PedsimAgentsDataframe]
         ]
 
     def write_data(self, file_name, data, mode="a"):
