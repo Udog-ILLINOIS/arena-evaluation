@@ -212,7 +212,8 @@ class Recorder:
             self._record(clock)
 
     def _record(self, clock: Clock):
-        current_simulation_action_time = clock.clock.secs * 10e9 + clock.clock.nsecs
+        # true ros time in ns (integer), see time_unit in params.yaml
+        current_simulation_action_time = clock.clock.secs * 10**9 + clock.clock.nsecs
 
         if not self.current_time:
             self.current_time = current_simulation_action_time
@@ -274,7 +275,8 @@ class Recorder:
                 "inter_planner": rospy.get_param(rospy.get_namespace() + "inter_planner", ""),
                 "local_planner": rospy.get_param(rospy.get_namespace() + "local_planner", ""),
                 "agent_name": rospy.get_param(rospy.get_namespace() + "agent_name", ""),
-                "namespace": rospy.get_namespace().replace("/", "")
+                "namespace": rospy.get_namespace().replace("/", ""),
+                "time_unit": "ns"
             }, file)
 
 

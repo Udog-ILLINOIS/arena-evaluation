@@ -211,6 +211,7 @@ class Metrics:
 
         self.dir = dir
         self.robot_params = self._get_robot_params()
+        self.time_unit = self._get_time_unit()
 
         data = pd.concat(self._load_data(), axis=1, join="inner")
         data = data.loc[:,~data.columns.duplicated()].copy()
@@ -237,7 +238,7 @@ class Metrics:
     
     def _analyze_episode(self, episode: pd.DataFrame, index) -> Metric:
 
-        episode["time"] /= 10**10
+        episode["time"] = Utils.time_to_seconds(episode["time"], self.time_unit)
         
         positions = np.array([frame["position"] for frame in episode["odom"]])
         velocities = np.array([frame["position"] for frame in episode["odom"]])
@@ -303,6 +304,10 @@ class Metrics:
 
         with open(robot_model_params_file, "r") as file:
             return yaml.safe_load(file)
+
+    def _get_time_unit(self):
+        with open(os.path.join(self.dir, "params.yaml")) as file:
+            return yaml.safe_load(file).get("time_unit")
 
     def _get_mean_position(self, episode, key):
         positions = episode[key].to_list()

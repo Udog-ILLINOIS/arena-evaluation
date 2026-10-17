@@ -22,6 +22,21 @@ class Utils:
     @classmethod
     def parse_pedsim(cls, entry: str) -> typing.List[Pedestrian]:
         return [Pedestrian(**ped) for ped in ast.literal_eval(entry)]
+
+    # recorder time column: new folders store true nanoseconds and write
+    # "time_unit: ns" to params.yaml, older folders (no time_unit) stored
+    # secs * 1e10 + nsecs
+    LEGACY_SECS_SCALE = 10**10
+
+    @classmethod
+    def time_to_seconds(cls, time, time_unit=None):
+        if time_unit == "ns":
+            return time / 10**9
+
+        if time_unit is None:
+            return time // cls.LEGACY_SECS_SCALE + (time % cls.LEGACY_SECS_SCALE) / 10**9
+
+        raise ValueError(f"unknown time_unit in params.yaml: {time_unit}")
     
 
 T = typing.TypeVar("T")
