@@ -8,6 +8,7 @@ import csv
 import os
 import math
 import re
+import threading
 from rosgraph_msgs.msg import Clock
 from rospy.core import traceback
 import rostopic
@@ -116,10 +117,20 @@ class DataCollector:
             self.data 
         )
 
+    def shutdown(self):
+        subscriber = getattr(self, "subscriber", None)
+        if subscriber is not None:
+            subscriber.unregister()
+            self.subscriber = None
+
 
 class Recorder:
     def __init__(self, result_dir):
         self.model = rospy.get_param(os.path.join(rospy.get_namespace(), "model"), "")
+
+        # guards against callbacks that are still running while shutdown() is called
+        self._lock = threading.Lock()
+        self._active = True
 
         self.base_dir = rospkg.RosPack().get_path("arena_evaluation")
         self.result_dir = os.path.join(self.base_dir, "data", result_dir)
@@ -174,10 +185,33 @@ class Recorder:
 
         # print(rosparam.print_params("", "/"))
 
+    def shutdown(self):
+        # stop all subscribers and wait for a running write to finish, so this
+        # recorder never writes into its folder again
+        with self._lock:
+            self._active = False
+
+            for sub in [self.clock_sub, self.scenario_reset_sub]:
+                sub.unregister()
+
+            for collector in self.data_collectors:
+                collector.shutdown()
+
     def scenario_reset_callback(self, data: Int16):
-        self.current_episode = data.data
+        with self._lock:
+            if not self._active:
+                return
+
+            self.current_episode = data.data
 
     def clock_callback(self, clock: Clock):
+        with self._lock:
+            if not self._active:
+                return
+
+            self._record(clock)
+
+    def _record(self, clock: Clock):
         current_simulation_action_time = clock.clock.secs * 10e9 + clock.clock.nsecs
 
         if not self.current_time:
@@ -244,6 +278,13 @@ class Recorder:
             }, file)
 
 
+def replace_recorder(recorder: Recorder, result_dir: str) -> Recorder:
+    # the old recorder must stop before the new one starts, otherwise it keeps
+    # writing every later episode into its old folder
+    recorder.shutdown()
+    return Recorder(result_dir)
+
+
 if __name__=="__main__":
 
     parser = argparse.ArgumentParser()
@@ -271,11 +312,12 @@ if __name__=="__main__":
         return directory
 
     recorder = Recorder(get_directory(arguments.dir))
+    reconfigure_lock = threading.Lock()
 
     def reconfigure(directory:str):
         global recorder
-        del recorder
-        recorder = Recorder(get_directory(directory))
+        with reconfigure_lock:
+            recorder = replace_recorder(recorder, get_directory(directory))
         return True
 
     #time.sleep(5)   
