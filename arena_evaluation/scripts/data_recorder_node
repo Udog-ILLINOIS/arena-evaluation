@@ -164,6 +164,8 @@ class Recorder:
         self.write_data("start_goal", ["episode", "start", "goal"], mode="w")
 
         self.current_episode = 0
+        # one start_goal row per episode, see write_start_goal()
+        self.start_goal_written = False
 
         self.config = self.read_config()
 
@@ -192,6 +194,9 @@ class Recorder:
                 return
 
             self.current_episode = data.data
+            # the task generator sets the start and goal params before it
+            # publishes scenario_reset, so they belong to this episode
+            self.write_start_goal()
 
     def clock_callback(self, clock: Clock):
         with self._lock:
@@ -220,11 +225,19 @@ class Recorder:
             self.write_data(topic_name, [self.current_time, data, msg_time])
         
         self.write_data("episode", [self.current_time, self.current_episode])
+
+        # first episode when no scenario_reset arrived yet; a later
+        # scenario_reset for the same episode writes a newer row
+        if not self.start_goal_written:
+            self.write_start_goal()
+
+    def write_start_goal(self):
         self.write_data("start_goal", [
             self.current_episode, 
             rospy.get_param(rospy.get_namespace() + "start", [0, 0, 0]), 
             rospy.get_param(rospy.get_namespace() + "goal", [0, 0, 0])
         ])
+        self.start_goal_written = True
 
     def read_config(self):
         with open(self.base_dir + "/data_recorder_config.yaml") as file:

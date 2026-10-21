@@ -194,18 +194,37 @@ class Metrics:
 #            "data": Utils.string_to_float_list
 #        }).rename(columns={"data": "cmd_vel"})
 
-        start_goal = pd.read_csv(os.path.join(self.dir, "start_goal.csv"), converters={
-            "start": Utils.string_to_float_list,
-            "goal": Utils.string_to_float_list
-        })
-
         return [
             episode,
             laserscan,
             odom,
 #            cmd_vel,
-            start_goal
         ]
+
+    def _load_start_goal(self) -> pd.DataFrame:
+        return pd.read_csv(os.path.join(self.dir, "start_goal.csv"), converters={
+            "start": Utils.string_to_float_list,
+            "goal": Utils.string_to_float_list
+        })
+
+    @staticmethod
+    def _is_start_goal_per_tick(start_goal: pd.DataFrame) -> bool:
+        # old recorders wrote one row per tick (row aligned with the other
+        # files), new ones one row per episode (at most two: the first tick
+        # and the scenario_reset of that episode)
+        return len(start_goal) > 2 * start_goal["episode"].nunique()
+
+    @staticmethod
+    def _merge_start_goal(data: pd.DataFrame, start_goal: pd.DataFrame) -> pd.DataFrame:
+        # the last row of an episode wins; episodes without a row get the
+        # recorder's default
+        rows = start_goal.drop_duplicates(subset="episode", keep="last").set_index("episode")
+
+        for key in ["start", "goal"]:
+            values = rows[key].to_dict()
+            data[key] = [values.get(episode, [0, 0, 0]) for episode in data["episode"]]
+
+        return data
 
     def __init__(self, dir: str):
 
@@ -213,8 +232,18 @@ class Metrics:
         self.robot_params = self._get_robot_params()
         self.time_unit = self._get_time_unit()
 
-        data = pd.concat(self._load_data(), axis=1, join="inner")
+        frames = self._load_data()
+        start_goal = self._load_start_goal()
+        start_goal_per_tick = self._is_start_goal_per_tick(start_goal)
+
+        if start_goal_per_tick:
+            frames.append(start_goal)
+
+        data = pd.concat(frames, axis=1, join="inner")
         data = data.loc[:,~data.columns.duplicated()].copy()
+
+        if not start_goal_per_tick:
+            data = self._merge_start_goal(data, start_goal)
 
         i = 0
 

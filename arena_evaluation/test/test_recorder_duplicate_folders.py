@@ -152,6 +152,7 @@ class RecorderDuplicateFoldersTest(unittest.TestCase):
 
         old_episode_rows = len(self._rows("run/scenario_1", "episode"))
         old_scan_rows = len(self._rows("run/scenario_1", "scan"))
+        old_start_goal_rows = len(self._rows("run/scenario_1", "start_goal"))
         self.assertGreater(old_episode_rows, 1)
 
         recorder = self._replace(recorder, "run/scenario_2")
@@ -160,7 +161,7 @@ class RecorderDuplicateFoldersTest(unittest.TestCase):
 
         self.assertEqual(len(self._rows("run/scenario_1", "episode")), old_episode_rows)
         self.assertEqual(len(self._rows("run/scenario_1", "scan")), old_scan_rows)
-        self.assertEqual(len(self._rows("run/scenario_1", "start_goal")), old_episode_rows)
+        self.assertEqual(len(self._rows("run/scenario_1", "start_goal")), old_start_goal_rows)
         self.assertGreater(len(self._rows("run/scenario_2", "episode")), 1)
         self.assertGreater(len(self._rows("run/scenario_2", "scan")), 1)
 
