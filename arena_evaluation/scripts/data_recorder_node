@@ -143,7 +143,9 @@ class Recorder:
         self.result_dir = os.path.join(self.base_dir, "data", result_dir)
 
         os.makedirs(self.result_dir, exist_ok=True)
-        
+
+        self.config = self.read_config()
+
         self.write_params()
 
         # subscribe by name, whether or not the topic is published yet
@@ -166,8 +168,6 @@ class Recorder:
         self.current_episode = 0
         # one start_goal row per episode, see write_start_goal()
         self.start_goal_written = False
-
-        self.config = self.read_config()
 
         self.current_time = None
         self.clock_sub = rospy.Subscriber("/clock", Clock, self.clock_callback)
@@ -268,7 +268,14 @@ class Recorder:
                 "local_planner": rospy.get_param(rospy.get_namespace() + "local_planner", ""),
                 "agent_name": rospy.get_param(rospy.get_namespace() + "agent_name", ""),
                 "namespace": rospy.get_namespace().replace("/", ""),
-                "time_unit": "ns"
+                "time_unit": "ns",
+                # run settings needed to interpret the data later
+                "man_gap": rospy.get_param("/man_gap", None),
+                "use_sim_time": rospy.get_param("/use_sim_time", None),
+                "record_frequency": self.config["record_frequency"],
+                "task_timeout": rospy.get_param("/task_generator_server/timeout", None),
+                "goal_radius": rospy.get_param("/task_generator_server/goal_radius", None),
+                "goal_tolerance_angle": rospy.get_param("/task_generator_server/goal_tolerance_angle", None)
             }, file)
 
 

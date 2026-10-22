@@ -117,7 +117,7 @@ all_episodes_distribution:
 # Plot all paths of all episodes for each robot
 episode_plots_for_namespaces:
     # list of desired results that should be plotted
-    desired_results: ("TIMEOUT" | "GOAL_REACHED" | "COLLISION")[]
+    desired_results: ("TIMEOUT" | "GOAL_REACHED" | "COLLISION" | "ABORTED")[]
     # Wether or not to add the obstacles from the scenario file to the plot
     should_add_obstacles: boolean # Optional -> Defaults to False
     # Wether or not to mark where collisions happened

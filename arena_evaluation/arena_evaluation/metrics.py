@@ -27,6 +27,7 @@ class DoneReason(str, enum.Enum):
     TIMEOUT = "TIMEOUT"
     GOAL_REACHED = "GOAL_REACHED"
     COLLISION = "COLLISION"
+    ABORTED = "ABORTED" # ended before the timeout, away from the goal
 
 
 class Metric(typing.TypedDict):
@@ -72,9 +73,15 @@ class PedsimMetric(Metric, typing.TypedDict):
 
 
 class Config:
-    TIMEOUT_TRESHOLD = 180
+    TIMEOUT_TRESHOLD = 180 # used when params.yaml has no task_timeout
     MAX_COLLISIONS = 1
     MIN_EPISODE_LENGTH = 1
+    RECORD_FREQUENCY = 400 # ms, used when params.yaml has no record_frequency
+
+    # task generator defaults (TaskGenerator.cfg), used when params.yaml has none
+    GOAL_RADIUS = 1.0
+    GOAL_TOLERANCE_ANGLE = 2 * np.pi
+    GOAL_CHECK_PERIOD = 0.5 # s, task generator checks for the goal at this period
     
     PERSONAL_SPACE_RADIUS = 1 # personal space is estimated at around 1'-4'
     ROBOT_GAZE_ANGLE = np.radians(5) # size of (one half of) direct robot gaze cone
@@ -187,7 +194,7 @@ class Metrics:
         }).rename(columns={"data": "laserscan"})
 
         odom = pd.read_csv(os.path.join(self.dir, "odom.csv"), converters={
-            "data": lambda col: json.loads(col.replace("'", "\""))
+            "data": lambda col: json.loads(col.replace("'", "\"")) if col else None
         }).rename(columns={"data": "odom"})
 
 #        cmd_vel = pd.read_csv(os.path.join(self.dir, "cmd_vel.csv"), converters={
@@ -231,6 +238,7 @@ class Metrics:
         self.dir = dir
         self.robot_params = self._get_robot_params()
         self.time_unit = self._get_time_unit()
+        self.run_params = self._get_run_params()
 
         frames = self._load_data()
         start_goal = self._load_start_goal()
@@ -245,20 +253,27 @@ class Metrics:
         if not start_goal_per_tick:
             data = self._merge_start_goal(data, start_goal)
 
-        i = 0
+        data = self._drop_empty_rows(data)
 
         episode_data = self._episode_data = {}
 
-        while True:
+        # every episode id in the data, whether or not the ids are contiguous
+        for i in sorted(data["episode"].unique()):
             current_episode = data[data["episode"] == i]
 
             # print("current_episode: ", current_episode)
 
             if len(current_episode) < Config.MIN_EPISODE_LENGTH:
-                break
+                continue
             
             episode_data[i] = self._analyze_episode(current_episode, i)
-            i = i + 1
+
+    def _drop_empty_rows(self, data: pd.DataFrame) -> pd.DataFrame:
+        # rows written before the first message of a topic have an empty cell
+        complete = np.array([odom is not None for odom in data["odom"]], dtype=bool)
+        complete &= np.array([len(scan) > 0 for scan in data["laserscan"]], dtype=bool)
+
+        return data[complete]
 
     @property
     def data(self) -> pd.DataFrame:
@@ -270,7 +285,8 @@ class Metrics:
         episode["time"] = Utils.time_to_seconds(episode["time"], self.time_unit)
         
         positions = np.array([frame["position"] for frame in episode["odom"]])
-        velocities = np.array([frame["position"] for frame in episode["odom"]])
+        # linear velocity (vx, vy); the angular rate is not part of the speed
+        velocities = np.array([frame["velocity"][:2] for frame in episode["odom"]])
 
         curvature, normalized_curvature = Math.curvature(positions)
         roughness = Math.roughness(positions)
@@ -311,7 +327,7 @@ class Metrics:
             time_diff = time, ## Ros time in ns
             time = list(map(int, episode["time"].tolist())),
             episode = index,
-            result = self._get_success(time, collision_amount),
+            result = self._get_success(time, collision_amount, positions[-1], velocities[-1], goal_position),
 #            cmd_vel = list(map(list, episode["cmd_vel"].to_list())),
             goal = goal_position,
             start = start_position
@@ -338,6 +354,24 @@ class Metrics:
         with open(os.path.join(self.dir, "params.yaml")) as file:
             return yaml.safe_load(file).get("time_unit")
 
+    def _get_run_params(self):
+        with open(os.path.join(self.dir, "params.yaml")) as file:
+            content = yaml.safe_load(file)
+
+        def get(key, default):
+            value = content.get(key)
+            return default if value is None else value
+
+        timeout = get("task_timeout", Config.TIMEOUT_TRESHOLD)
+
+        return {
+            # the task generator treats a negative timeout as none
+            "timeout": np.inf if timeout < 0 else timeout,
+            "record_interval": get("record_frequency", Config.RECORD_FREQUENCY) / 1000,
+            "goal_radius": get("goal_radius", Config.GOAL_RADIUS),
+            "goal_tolerance_angle": get("goal_tolerance_angle", Config.GOAL_TOLERANCE_ANGLE)
+        }
+
     def _get_mean_position(self, episode, key):
         positions = episode[key].to_list()
         counter = {}
@@ -347,9 +381,11 @@ class Metrics:
 
             counter[hash] = counter.get(hash, 0) + 1
 
-        sorted_positions = dict(sorted(counter.items(), key=lambda x: x))
+        # most frequent value; old per-tick files start an episode with a few
+        # rows of the recorder default before the task generator sets the param
+        most_frequent = max(counter.items(), key=lambda x: x[1])[0]
 
-        return [float(r) for r in list(sorted_positions.keys())[0].split(":")]
+        return [float(r) for r in most_frequent.split(":")]
 
     def _get_position_for_collision(self, collisions, positions):
         for i, collision in enumerate(collisions):
@@ -357,14 +393,37 @@ class Metrics:
 
         return collisions
 
-    def _get_success(self, time, collisions):
-        if time >= Config.TIMEOUT_TRESHOLD:
+    def _get_success(self, time, collisions, final_position, final_velocity, goal):
+        # rows are written every record interval, so the last row of an
+        # episode that timed out can be up to one interval (plus one tick)
+        # before the timeout
+        if time >= self.run_params["timeout"] - 2 * self.run_params["record_interval"]:
             return DoneReason.TIMEOUT
 
         if collisions >= Config.MAX_COLLISIONS:
             return DoneReason.COLLISION
 
-        return DoneReason.GOAL_REACHED
+        if self._is_at_goal(final_position, final_velocity, goal):
+            return DoneReason.GOAL_REACHED
+
+        return DoneReason.ABORTED
+
+    def _is_at_goal(self, position, velocity, goal):
+        # same test as the task generator (RobotManager._is_goal_reached), on
+        # the last recorded row. The task generator checks every
+        # GOAL_CHECK_PERIOD and rows are written every record interval, so
+        # the last row can be from before the robot entered the goal radius;
+        # allow for the distance it covers in that time.
+        lag = self.run_params["record_interval"] + Config.GOAL_CHECK_PERIOD
+        radius = self.run_params["goal_radius"] + np.linalg.norm(velocity) * lag
+
+        distance = np.linalg.norm(np.array(goal[:2]) - np.array(position[:2]))
+        angle = Math.angle_difference(goal[2], position[2])
+
+        return (
+            distance < radius
+            and angle < self.run_params["goal_tolerance_angle"]
+        )
     
     def _get_collisions(self, laser_scans, lower_bound):
         """
@@ -430,10 +489,15 @@ class PedsimMetrics(Metrics):
     def _load_data(self) -> List[DataFrame]:
         pedsim_data = pd.read_csv(
             os.path.join(self.dir, "pedsim_agents_data.csv"),
-            converters = {"data": Utils.parse_pedsim}
+            converters = {"data": lambda entry: Utils.parse_pedsim(entry) if entry else None}
         ).rename(columns={"data": "peds"})
         
         return super()._load_data() + [pedsim_data]
+
+    def _drop_empty_rows(self, data: pd.DataFrame) -> pd.DataFrame:
+        data = super()._drop_empty_rows(data)
+
+        return data[np.array([peds is not None for peds in data["peds"]], dtype=bool)]
     
     def __init__(self, dir: str, **kwargs):
         super().__init__(dir=dir, **kwargs)

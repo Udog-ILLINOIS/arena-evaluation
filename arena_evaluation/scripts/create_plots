@@ -88,7 +88,7 @@ angle_over_length       FLOAT                                   # Mean change of
 action_type             (MOVE | STOP | ROTATE)[]                # Action type of the robot for each timestep
 time_diff               INT                                     # Time the episode took, ros time in ns
 time                    INT[]                                   # Time of each step
-result                  TIMEOUT | GOAL_REACHED | COLLISION      # Wether an episode was successful or not
+result                  TIMEOUT | GOAL_REACHED | COLLISION | ABORTED      # Wether an episode was successful or not
 
 """
 

@@ -168,8 +168,9 @@ class MetricsLegacyStartGoalTest(unittest.TestCase):
 
             self.assertEqual(len(data[0]["path"]), 4)
             self.assertEqual(len(data[1]["path"]), 3)
-            # the old reader keeps the lexicographically smallest value of an episode
-            self.assertEqual(data[0]["goal"], [0.0, 0.0, 0.0])
+            # the most frequent value of an episode, not the recorder default
+            # written before the task generator set the param
+            self.assertEqual(data[0]["goal"], GOALS[0])
             self.assertEqual(data[1]["goal"], GOALS[1])
 
 

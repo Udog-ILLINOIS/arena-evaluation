@@ -42,14 +42,14 @@ To transform the dataset for later plotting and calculate the metrics from the r
 | path length values   | Float[]                              | The length of each path between two continuous timestamps                                                                                 |
 | acceleration         | Float[]                              | The acceleration of the robot. Calculated as the gradient between two velocities.                                                         |
 | jerk                 | Float[]                              | Describes the change in acceleration.                                                                                                     |
-| velocity             | Float[][]                            | The real velocity of the robot.                                                                                                           |
+| velocity             | Float[]                              | The robot's linear speed (norm of the odometry vx, vy).                                                                                   |
 | cmd_vel              | Float[][]                            | The robots desired velocity denoted by the planner                                                                                        |
 | collision amount     | Int                                  | Absolute amount of collisions in an episode.                                                                                              |
 | collisions           | Int[]                                | Index of the positions in which a collision occured.                                                                                      |
 | path                 | Float[][]                            | Array of positions in which the robot was located for specific timestamps.                                                                |
 | angle over length    | Float                                | The complete angle over the complete length of the path the robot took.                                                                   |
 | time diff            | Int                                  | The complete time of the episode.                                                                                                         |
-| result               | TIMEOUT \| GOAL_REACHED \| COLLISION | The reason the episode has ended.                                                                                                         |
+| result               | TIMEOUT \| GOAL_REACHED \| COLLISION \| ABORTED | The reason the episode has ended. GOAL_REACHED only if the last recorded pose is within the goal tolerance; ABORTED if the episode ended before the timeout away from the goal. |
 
 # Plot Data
 
@@ -175,7 +175,7 @@ all_episodes_distribution:
 # Plot all paths of all episodes for each robot
 episode_plots_for_namespaces:
     # list of desired results that should be plotted
-    desired_results: ("TIMEOUT" | "GOAL_REACHED" | "COLLISION")[]
+    desired_results: ("TIMEOUT" | "GOAL_REACHED" | "COLLISION" | "ABORTED")[]
     # Wether or not to add the obstacles from the scenario file to the plot
     should_add_obstacles: boolean # Optional -> Defaults to False
     # Wether or not to mark where collisions happened
