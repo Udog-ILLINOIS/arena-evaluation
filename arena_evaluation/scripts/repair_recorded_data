@@ -15,13 +15,16 @@ never modified. With --dry-run only the report is printed.
    folders have odom.csv) the same odometry.
 
    Recording folders (folders with an episode.csv) of the same robot
-   namespace are grouped into runs: a later folder joins an earlier one when
+   namespace and the same launch folder (<planner>_<date>_<time>, created per
+   launch by the recorder's auto: prefix; RUN_DIR itself if there is none) are
+   grouped into runs: a later folder joins an earlier one when at least 5 and
    at least half of its rows are found, with the same time and odometry, in
-   the earlier folder. Folders of independent runs (whose episode ids and
-   times restart) share no rows and are never grouped. Within a run, folders
-   are ordered by the time of their first row; each keeps only the episode
-   ids that are not in the next folder, and the last keeps all. Rows of the
-   data files are kept or dropped with their episode (matched by time;
+   the earlier folder. Sim time restarts at every launch, so folders of
+   different launches are never grouped (their times collide, and tiny
+   folders can share a row of the same start pose). Within a run, folders are
+   ordered by the time of their first row; each keeps only the episode ids
+   that are not in the next folder, and the last keeps all. Rows of the data
+   files are kept or dropped with their episode (matched by time;
    start_goal.csv by its episode column).
 
 2. Time scale (issue 02). Folders without time_unit in params.yaml stored time
@@ -32,6 +35,7 @@ never modified. With --dry-run only the report is printed.
 import argparse
 import csv
 import os
+import re
 import shutil
 import sys
 
@@ -39,6 +43,9 @@ import yaml
 
 LEGACY_SECS_SCALE = 10**10
 MIN_SHARED_ROWS = 0.5  # share of a later folder's rows found in an earlier folder of the same run
+MIN_SHARED_ROWS_ABS = 5  # and at least this many rows (tiny folders share start-pose rows by chance)
+# the folder the recorder's "auto:" prefix creates per launch, e.g. dgap_26-07-23_16-43-39
+LAUNCH_DIR = re.compile(r"_\d{2}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$")
 TIME_COLUMNS = ("time", "msg_time")
 csv.field_size_limit(sys.maxsize)
 
@@ -117,6 +124,18 @@ def shared_rows(earlier, earlier_odom, later, later_odom):
     return sum(1 for t in common if t in later_odom and earlier_odom.get(t) == later_odom.get(t))
 
 
+def launch_dir(folder, run_dir):
+    """Nearest enclosing per-launch folder (<planner>_<date>_<time>), else run_dir.
+    Sim time restarts at every launch, so only folders of one launch can be copies."""
+    path = os.path.normpath(folder)
+    run_dir = os.path.normpath(run_dir)
+    while path.startswith(run_dir) and path != run_dir:
+        if LAUNCH_DIR.search(os.path.basename(path)):
+            return path
+        path = os.path.dirname(path)
+    return run_dir
+
+
 def group_runs(infos, odom):
     """Lists of folders that belong to one run (see rule 1)."""
     parent = {info["folder"]: info["folder"] for info in infos}
@@ -130,10 +149,12 @@ def group_runs(infos, odom):
     for earlier in infos:
         for later in infos:
             if (later is earlier or later["namespace"] != earlier["namespace"]
+                    or later["launch"] != earlier["launch"]
                     or earlier["first_time"] is None or later["first_time"] is None
                     or later["first_time"] <= earlier["first_time"] or not later["all_times"]):
                 continue
-            if shared_rows(earlier, odom(earlier), later, odom(later)) >= MIN_SHARED_ROWS * len(later["all_times"]):
+            shared = shared_rows(earlier, odom(earlier), later, odom(later))
+            if shared >= MIN_SHARED_ROWS_ABS and shared >= MIN_SHARED_ROWS * len(later["all_times"]):
                 parent[find(later["folder"])] = find(earlier["folder"])
 
     runs = {}
@@ -154,6 +175,7 @@ def plan_repair(run_dir):
 
     for info in infos:
         info["all_times"] = set().union(*info["times"].values()) if info["times"] else set()
+        info["launch"] = launch_dir(info["folder"], run_dir)
 
     for number, run in enumerate(sorted(group_runs(infos, odom), key=lambda r: min(i["folder"] for i in r))):
         run.sort(key=lambda i: (i["first_time"] is None, i["first_time"] or 0, i["folder"]))

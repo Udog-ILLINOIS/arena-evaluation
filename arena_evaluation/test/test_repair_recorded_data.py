@@ -77,10 +77,10 @@ class RepairTest(unittest.TestCase):
         self.run = os.path.join(self.tmp, "dgap_run")
         # one recorder process; each folder was created at the start of its
         # episode and got a copy of every later row
-        rows = timeline(5, [0, 1, 2])
+        rows = timeline(5, [0, 1, 2], rows_per_episode=6)
         write_folder(os.path.join(self.run, "dgap", "scenario_2"), rows, nested=True)
-        write_folder(os.path.join(self.run, "dgap", "scenario_3"), rows[3:])
-        write_folder(os.path.join(self.run, "dgap", "scenario_10"), rows[6:])
+        write_folder(os.path.join(self.run, "dgap", "scenario_3"), rows[6:])
+        write_folder(os.path.join(self.run, "dgap", "scenario_10"), rows[12:])
         self.before = {root: sorted(files) for root, _, files in os.walk(self.run)}
         with open(os.path.join(self.run, "dgap", "scenario_3", "episode.csv")) as f:
             self.original_episodes = f.read()
@@ -114,7 +114,7 @@ class RepairTest(unittest.TestCase):
         episodes = read(os.path.join(s3, "episode.csv"))
         self.assertEqual({r[1] for r in episodes}, {"1"})
         # secs * 1e10 + nsecs -> ns
-        self.assertEqual(episodes[0][0], str(8 * 10**9 + 500000000))
+        self.assertEqual(episodes[0][0], str(11 * 10**9 + 500000000))
         self.assertEqual([r[0] for r in read(os.path.join(s3, "scan.csv"))], [r[0] for r in episodes])
         self.assertEqual({r[0] for r in read(os.path.join(s3, "start_goal.csv"))}, {"1"})
         with open(os.path.join(s3, "params.yaml")) as f:
@@ -122,7 +122,7 @@ class RepairTest(unittest.TestCase):
 
         s2 = os.path.join(out, "dgap", "scenario_2", "rto")
         self.assertEqual({r[1] for r in read(os.path.join(s2, "episode.csv"))}, {"0"})
-        self.assertEqual(len(read(os.path.join(s2, "scan.csv"))), 3)
+        self.assertEqual(len(read(os.path.join(s2, "scan.csv"))), 6)
 
     def test_new_time_unit_is_not_converted(self):
         new_run = os.path.join(self.tmp, "new_run")
@@ -141,11 +141,29 @@ class RepairTest(unittest.TestCase):
         keep = {os.path.relpath(f, parent): info["keep"] for f, info in plan.items()}
         self.assertEqual(keep, {os.path.join("run_a", "s0"): [0, 1, 2], os.path.join("run_b", "s0"): [0]})
 
+    def test_tiny_runs_of_different_launches_are_not_merged(self):
+        # sim time restarts per launch; two short runs start from the same pose
+        parent = os.path.join(self.tmp, "attempt")
+        start = timeline(7, [0], rows_per_episode=2)
+        write_folder(os.path.join(parent, "dgap_26-06-15_22-56-05", "dgap", "s", "rto"), start)
+        write_folder(os.path.join(parent, "dgap_26-06-15_23-52-15", "dgap", "s", "rto"), start[:1] + timeline(8, [0], 10, x0=40.0))
+        write_folder(os.path.join(parent, "dgap_26-06-16_00-27-25", "dgap", "s", "rto"), start)
+        plan = self.m.plan_repair(parent)
+        self.assertTrue(all(info["keep"] == [0] for info in plan.values()), plan)
+
+    def test_few_shared_rows_do_not_group(self):
+        parent = os.path.join(self.tmp, "parent")
+        rows = timeline(5, [0, 1])
+        write_folder(os.path.join(parent, "a"), rows)
+        write_folder(os.path.join(parent, "b"), rows[:2] + timeline(9, [1], x0=50.0))
+        plan = self.m.plan_repair(parent)
+        self.assertEqual(sorted(info["keep"] for info in plan.values()), [[0, 1], [0, 1]])
+
     def test_runs_are_grouped_by_shared_rows(self):
         parent = os.path.join(self.tmp, "parent")
-        rows = timeline(5, [0, 1, 2])
+        rows = timeline(5, [0, 1, 2], rows_per_episode=6)
         write_folder(os.path.join(parent, "run_a", "s0"), rows)
-        write_folder(os.path.join(parent, "run_a", "s1"), rows[6:])
+        write_folder(os.path.join(parent, "run_a", "s1"), rows[12:])
         write_folder(os.path.join(parent, "run_b", "s0"), timeline(5, [0, 1], x0=50.0))
         plan = self.m.plan_repair(parent)
         keep = {os.path.relpath(f, parent): info["keep"] for f, info in plan.items()}
@@ -172,7 +190,7 @@ class RepairTest(unittest.TestCase):
         with mock.patch.object(metrics.Metrics, "_get_robot_params", return_value={"robot_radius": 0.2}):
             data = metrics.Metrics(folder)._episode_data
         self.assertEqual(sorted(data), [1])
-        self.assertAlmostEqual(data[1]["time_diff"], 2.0)
+        self.assertAlmostEqual(data[1]["time_diff"], 5.0)
 
 
 if __name__ == "__main__":
