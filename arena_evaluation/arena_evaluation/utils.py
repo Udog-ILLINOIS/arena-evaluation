@@ -10,6 +10,7 @@ class Pedestrian(typing.NamedTuple):
     position: typing.List[float]
     theta: float
     destination: typing.List[float]
+    velocity: typing.Optional[typing.List[float]] = None # absent in old recordings
 
 class Utils:
     @staticmethod

@@ -27,6 +27,9 @@ from arena_evaluation.utils import Pedestrian
 # for transformations
 from tf.transformations import euler_from_quaternion
 
+# m/s; below this a pedestrian's heading is taken from its force
+PEDESTRIAN_MIN_SPEED = 0.01
+
 
 class DataCollector:
     def __init__(self, topic):
@@ -47,6 +50,9 @@ class DataCollector:
         # held message and its receive time in ns, replaced together so a
         # row never pairs new data with an old receive time
         self.sample = (None, None)
+        # smallest scan range since the last row, see take_scan_min()
+        self._scan_min_lock = threading.Lock()
+        self._scan_min = None
 
         print(topic[0])
 
@@ -62,7 +68,24 @@ class DataCollector:
         self.sample = (data, stamp.secs * 10**9 + stamp.nsecs)
 
     def laserscan_callback(self, msg_laserscan: LaserScan):
-        self.hold([msg_laserscan.range_max if math.isnan(val) else round(val, 3) for val in msg_laserscan.ranges])
+        ranges = [msg_laserscan.range_max if math.isnan(val) else round(val, 3) for val in msg_laserscan.ranges]
+
+        # before hold(): a scan written to a row is always in that row's scan_min
+        if ranges:
+            with self._scan_min_lock:
+                scan_min = min(ranges)
+                if self._scan_min is None or scan_min < self._scan_min:
+                    self._scan_min = scan_min
+
+        self.hold(ranges)
+
+    def take_scan_min(self):
+        # smallest range of every scan received since the last call, so a
+        # contact between two rows is not missed; None if no scan arrived
+        with self._scan_min_lock:
+            scan_min, self._scan_min = self._scan_min, None
+
+        return scan_min
 
     def odometry_callback(self, msg_odometry: Odometry):
         pose3d = msg_odometry.pose.pose
@@ -101,6 +124,14 @@ class DataCollector:
             ]
         ])
 
+    @staticmethod
+    def pedestrian_heading(agent):
+        # heading of the walk; the force direction only when standing still
+        if math.hypot(agent.twist.linear.x, agent.twist.linear.y) > PEDESTRIAN_MIN_SPEED:
+            return np.arctan2(agent.twist.linear.y, agent.twist.linear.x)
+
+        return np.arctan2(agent.forces.force.y, agent.forces.force.x)
+
     def pedsim_callback(self, msg_pedsim: pedsim_msgs.PedsimAgentsDataframe):
         self.hold([
             Pedestrian(
@@ -108,8 +139,9 @@ class DataCollector:
                 type = agent.type,
                 social_state = agent.social_state,
                 position = [agent.pose.position.x, agent.pose.position.y],
-                theta = np.arctan2(agent.forces.force.y, agent.forces.force.x),
-                destination = [agent.destination.x, agent.destination.y]
+                theta = self.pedestrian_heading(agent),
+                destination = [agent.destination.x, agent.destination.y],
+                velocity = [agent.twist.linear.x, agent.twist.linear.y]
             )._asdict()
             for agent
             in msg_pedsim.agent_states
@@ -164,6 +196,7 @@ class Recorder:
 
         self.write_data("episode", ["time", "episode"], mode="w")
         self.write_data("start_goal", ["episode", "start", "goal"], mode="w")
+        self.write_data("scan_min", ["time", "data"], mode="w")
 
         self.current_episode = 0
         # one start_goal row per episode, see write_start_goal()
@@ -223,6 +256,10 @@ class Recorder:
             topic_name, data, msg_time = collector.get_data()
             
             self.write_data(topic_name, [self.current_time, data, msg_time])
+
+            if topic_name == "scan":
+                scan_min = collector.take_scan_min()
+                self.write_data("scan_min", [self.current_time, "" if scan_min is None else scan_min])
         
         self.write_data("episode", [self.current_time, self.current_episode])
 

@@ -201,12 +201,21 @@ class Metrics:
 #            "data": Utils.string_to_float_list
 #        }).rename(columns={"data": "cmd_vel"})
 
-        return [
+        frames = [
             episode,
             laserscan,
             odom,
 #            cmd_vel,
         ]
+
+        # smallest scan range between rows; written by newer recorders only
+        scan_min_file = os.path.join(self.dir, "scan_min.csv")
+        if os.path.exists(scan_min_file):
+            frames.append(pd.read_csv(scan_min_file, converters={
+                "data": lambda val: float(val) if val else np.nan
+            }).rename(columns={"data": "scan_min"}))
+
+        return frames
 
     def _load_start_goal(self) -> pd.DataFrame:
         return pd.read_csv(os.path.join(self.dir, "start_goal.csv"), converters={
@@ -295,10 +304,16 @@ class Metrics:
         acceleration = Math.acceleration(vel_absolute)
         jerk = Math.jerk(vel_absolute)
 
-        collisions, collision_amount = self._get_collisions(
-            episode["laserscan"],
-            self.robot_params["robot_radius"]
-        )
+        if "scan_min" in episode:
+            collisions, collision_amount = self._get_collisions_from_min(
+                episode["scan_min"],
+                self.robot_params["robot_radius"]
+            )
+        else:
+            collisions, collision_amount = self._get_collisions(
+                episode["laserscan"],
+                self.robot_params["robot_radius"]
+            )
 
         path_length = Math.path_length(positions)
         turn = Math.turn(positions[:,2])
@@ -464,6 +479,34 @@ class Metrics:
             
             if is_collision:
                 collisions.append(i)
+
+        collision_amount = 0
+
+        for i, coll in enumerate(collisions_marker[1:]):
+            prev_coll = collisions_marker[i]
+
+            if coll - prev_coll > 0:
+                collision_amount += 1
+
+        return collisions, collision_amount
+
+    def _get_collisions_from_min(self, scan_min, lower_bound):
+        """
+        Like _get_collisions, from the smallest scan range seen between two
+        rows (scan_min.csv), so contacts shorter than a row are counted.
+        A row without a scan since the previous one keeps the previous state.
+        """
+        eps = 0.01 # same as _get_collisions
+
+        collisions_marker = []
+
+        for value in scan_min:
+            if np.isnan(value):
+                collisions_marker.append(collisions_marker[-1] if collisions_marker else False)
+            else:
+                collisions_marker.append(value <= (lower_bound + eps))
+
+        collisions = [i for i, is_collision in enumerate(collisions_marker) if is_collision]
 
         collision_amount = 0
 
