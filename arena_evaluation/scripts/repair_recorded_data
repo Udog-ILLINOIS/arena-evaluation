@@ -9,12 +9,20 @@ never modified. With --dry-run only the report is printed.
 
 1. Duplicate episodes (issue 01). Before the fix, a recorder kept writing every
    later episode into its old folder after change_directory, so each scenario
-   folder of a run holds its own episodes followed by those of every later
-   folder. The recording folders of a run (folders with an episode.csv), per
-   robot namespace, are ordered by the time of their first row. Each folder
-   keeps only the episode ids that are not in the next folder of that order;
-   the last folder keeps everything. Rows of the data files are kept or dropped
-   with their episode (matched by time; start_goal.csv by its episode column).
+   folder of a run holds its own episodes followed by copies of those of every
+   later folder. The old and the new recorder wrote the same clock ticks and
+   held the same messages, so copied rows have the same time and (when both
+   folders have odom.csv) the same odometry.
+
+   Recording folders (folders with an episode.csv) of the same robot
+   namespace are grouped into runs: a later folder joins an earlier one when
+   at least half of its rows are found, with the same time and odometry, in
+   the earlier folder. Folders of independent runs (whose episode ids and
+   times restart) share no rows and are never grouped. Within a run, folders
+   are ordered by the time of their first row; each keeps only the episode
+   ids that are not in the next folder, and the last keeps all. Rows of the
+   data files are kept or dropped with their episode (matched by time;
+   start_goal.csv by its episode column).
 
 2. Time scale (issue 02). Folders without time_unit in params.yaml stored time
    as secs * 1e10 + nsecs. Their time and msg_time columns are rewritten as
@@ -30,6 +38,7 @@ import sys
 import yaml
 
 LEGACY_SECS_SCALE = 10**10
+MIN_SHARED_ROWS = 0.5  # share of a later folder's rows found in an earlier folder of the same run
 TIME_COLUMNS = ("time", "msg_time")
 csv.field_size_limit(sys.maxsize)
 
@@ -75,27 +84,84 @@ def folder_info(folder):
     if rows:
         t = int(float(rows[0][0]))
         first = t // LEGACY_SECS_SCALE * 10**9 + t % LEGACY_SECS_SCALE if legacy else t
+    times = {}
+    for r in rows:
+        if len(r) > 1 and r[1] != "":
+            times.setdefault(int(r[1]), set()).add(r[0])
     return {
         "folder": folder,
         "namespace": params.get("namespace", ""),
         "legacy_time": legacy,
         "first_time": first,
-        "episodes": sorted({int(r[1]) for r in rows if len(r) > 1 and r[1] != ""}),
+        "episodes": sorted(times),
+        "times": times,
     }
 
 
-def plan_repair(run_dir):
-    """{folder: info + 'keep' (episode ids to keep)} following the rule above."""
-    infos = [folder_info(f) for f in recording_folders(run_dir)]
-    by_namespace = {}
-    for info in infos:
-        by_namespace.setdefault(info["namespace"], []).append(info)
+def read_odom(folder):
+    path = os.path.join(folder, "odom.csv")
+    if not os.path.exists(path):
+        return None
+    header, rows = read_csv(path)
+    if "time" not in header or "data" not in header:
+        return None
+    t, d = header.index("time"), header.index("data")
+    return {r[t]: r[d] for r in rows if len(r) > max(t, d)}
 
-    for group in by_namespace.values():
-        group.sort(key=lambda i: (i["first_time"] is None, i["first_time"] or 0, i["folder"]))
-        for info, nxt in zip(group, group[1:] + [None]):
+
+def shared_rows(earlier, earlier_odom, later, later_odom):
+    """Rows of the later folder that the earlier folder holds too (same time and odometry)."""
+    common = earlier["all_times"] & later["all_times"]
+    if earlier_odom is None or later_odom is None:
+        return len(common)
+    return sum(1 for t in common if t in later_odom and earlier_odom.get(t) == later_odom.get(t))
+
+
+def group_runs(infos, odom):
+    """Lists of folders that belong to one run (see rule 1)."""
+    parent = {info["folder"]: info["folder"] for info in infos}
+
+    def find(folder):
+        while parent[folder] != folder:
+            parent[folder] = parent[parent[folder]]
+            folder = parent[folder]
+        return folder
+
+    for earlier in infos:
+        for later in infos:
+            if (later is earlier or later["namespace"] != earlier["namespace"]
+                    or earlier["first_time"] is None or later["first_time"] is None
+                    or later["first_time"] <= earlier["first_time"] or not later["all_times"]):
+                continue
+            if shared_rows(earlier, odom(earlier), later, odom(later)) >= MIN_SHARED_ROWS * len(later["all_times"]):
+                parent[find(later["folder"])] = find(earlier["folder"])
+
+    runs = {}
+    for info in infos:
+        runs.setdefault(find(info["folder"]), []).append(info)
+    return list(runs.values())
+
+
+def plan_repair(run_dir):
+    """{folder: info + 'keep' and 'drop' (episode ids) and 'run'} following the rule above."""
+    infos = [folder_info(f) for f in recording_folders(run_dir)]
+    odoms = {}
+
+    def odom(info):
+        if info["folder"] not in odoms:
+            odoms[info["folder"]] = read_odom(info["folder"])
+        return odoms[info["folder"]]
+
+    for info in infos:
+        info["all_times"] = set().union(*info["times"].values()) if info["times"] else set()
+
+    for number, run in enumerate(sorted(group_runs(infos, odom), key=lambda r: min(i["folder"] for i in r))):
+        run.sort(key=lambda i: (i["first_time"] is None, i["first_time"] or 0, i["folder"]))
+        for info, nxt in zip(run, run[1:] + [None]):
             later = set(nxt["episodes"]) if nxt else set()
             info["keep"] = [e for e in info["episodes"] if e not in later]
+            info["drop"] = [e for e in info["episodes"] if e in later]
+            info["run"] = number
     return {info["folder"]: info for info in infos}
 
 
@@ -106,7 +172,6 @@ def repair_folder(folder, info):
     time_col = header.index("time")
     episode_col = header.index("episode")
     kept_times = {r[time_col] for r in rows if r[episode_col] != "" and int(r[episode_col]) in keep}
-    n_episode_rows = len(rows)
 
     counts = {}
     for name in sorted(os.listdir(folder)):
@@ -122,8 +187,6 @@ def repair_folder(folder, info):
         elif "time" in header:
             col = header.index("time")
             rows = [r for r in rows if r[col] in kept_times]
-        elif before == n_episode_rows:
-            pass  # no time column; nothing to match on
         counts[name] = (before, len(rows))
 
         if info["legacy_time"]:
@@ -160,8 +223,9 @@ def repair(run_dir, dry_run=False, out_dir=None):
             "namespace": info["namespace"],
             "legacy_time": info["legacy_time"],
             "episodes": info["episodes"],
+            "run": info["run"],
             "keep": info["keep"],
-            "drop": [e for e in info["episodes"] if e not in info["keep"]],
+            "drop": info["drop"],
         }
         if not dry_run:
             entry["rows"] = {k: "{} -> {}".format(*v) for k, v in repair_folder(os.path.join(out_dir, rel), info).items()}

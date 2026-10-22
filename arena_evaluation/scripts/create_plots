@@ -86,8 +86,8 @@ collisions              INT[]                                   # (unknonw) Inde
 path                    FLOAT[][]                               # (N - 1) Positions for each timestep
 angle_over_length       FLOAT                                   # Mean change of the angle over the complete path
 action_type             (MOVE | STOP | ROTATE)[]                # Action type of the robot for each timestep
-time_diff               INT                                     # Time the episode took, ros time in ns
-time                    INT[]                                   # Time of each step
+time_diff               FLOAT                                   # Time the episode took, in s
+time                    FLOAT[]                                 # Time of each step, in s
 result                  TIMEOUT | GOAL_REACHED | COLLISION | ABORTED      # Wether an episode was successful or not
 
 """
