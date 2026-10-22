@@ -242,7 +242,8 @@ class Recorder:
         # true ros time in ns (integer), see time_unit in params.yaml
         current_simulation_action_time = clock.clock.secs * 10**9 + clock.clock.nsecs
 
-        if not self.current_time:
+        # a sim time of 0 is a valid time
+        if self.current_time is None:
             self.current_time = current_simulation_action_time
 
         time_diff = (current_simulation_action_time - self.current_time) / 1e6 ## in ms
@@ -317,10 +318,12 @@ class Recorder:
 
 
 def replace_recorder(recorder: Recorder, result_dir: str) -> Recorder:
-    # the old recorder must stop before the new one starts, otherwise it keeps
-    # writing every later episode into its old folder
+    # the old recorder must stop once the new one exists, otherwise it keeps
+    # writing every later episode into its old folder. If the new one cannot
+    # be created, the old one keeps recording.
+    new_recorder = Recorder(result_dir)
     recorder.shutdown()
-    return Recorder(result_dir)
+    return new_recorder
 
 
 if __name__=="__main__":
@@ -355,7 +358,12 @@ if __name__=="__main__":
     def reconfigure(directory:str):
         global recorder
         with reconfigure_lock:
-            recorder = replace_recorder(recorder, get_directory(directory))
+            try:
+                recorder = replace_recorder(recorder, get_directory(directory))
+            except Exception:
+                rospy.logerr("data_recorder: could not record into {}, still recording into {}\n{}".format(
+                    directory, recorder.result_dir, traceback.format_exc()))
+                return False
         return True
 
     #time.sleep(5)   

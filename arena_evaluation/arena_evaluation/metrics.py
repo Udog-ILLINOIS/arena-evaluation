@@ -32,8 +32,8 @@ class DoneReason(str, enum.Enum):
 
 class Metric(typing.TypedDict):
 
-    time: typing.List[int]
-    time_diff: int
+    time: typing.List[float]
+    time_diff: float
     episode: int
     goal: typing.List
     start: typing.List
@@ -339,8 +339,8 @@ class Metrics:
             path = [list(p) for p in positions],
             angle_over_length = np.abs(turn.sum() / path_length.sum()),
 #            action_type = list(self._get_action_type(episode["cmd_vel"])),
-            time_diff = time, ## Ros time in ns
-            time = list(map(int, episode["time"].tolist())),
+            time_diff = time, ## episode duration in s
+            time = Math.round_values(episode["time"].tolist()), ## time of each row in s
             episode = index,
             result = self._get_success(time, collision_amount, positions[-1], velocities[-1], goal_position),
 #            cmd_vel = list(map(list, episode["cmd_vel"].to_list())),

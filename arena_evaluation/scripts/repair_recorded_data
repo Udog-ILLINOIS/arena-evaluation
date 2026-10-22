@@ -1,0 +1,184 @@
+#!/usr/bin/env python3
+"""
+Repair data folders written before IL fixes 01 and 02.
+
+    repair_recorded_data RUN_DIR [--dry-run]
+
+Writes a repaired copy to RUN_DIR_repaired (next to RUN_DIR); RUN_DIR itself is
+never modified. With --dry-run only the report is printed.
+
+1. Duplicate episodes (issue 01). Before the fix, a recorder kept writing every
+   later episode into its old folder after change_directory, so each scenario
+   folder of a run holds its own episodes followed by those of every later
+   folder. The recording folders of a run (folders with an episode.csv), per
+   robot namespace, are ordered by the time of their first row. Each folder
+   keeps only the episode ids that are not in the next folder of that order;
+   the last folder keeps everything. Rows of the data files are kept or dropped
+   with their episode (matched by time; start_goal.csv by its episode column).
+
+2. Time scale (issue 02). Folders without time_unit in params.yaml stored time
+   as secs * 1e10 + nsecs. Their time and msg_time columns are rewritten as
+   nanoseconds and params.yaml gets time_unit: ns.
+"""
+
+import argparse
+import csv
+import os
+import shutil
+import sys
+
+import yaml
+
+LEGACY_SECS_SCALE = 10**10
+TIME_COLUMNS = ("time", "msg_time")
+csv.field_size_limit(sys.maxsize)
+
+
+def legacy_to_ns(value):
+    """secs * 1e10 + nsecs (as written by the old recorder) -> nanoseconds."""
+    if value == "":
+        return value
+    t = int(float(value))
+    return str(t // LEGACY_SECS_SCALE * 10**9 + t % LEGACY_SECS_SCALE)
+
+
+def read_csv(path):
+    with open(path, newline="") as f:
+        rows = list(csv.reader(f))
+    return (rows[0], rows[1:]) if rows else ([], [])
+
+
+def write_csv(path, header, rows):
+    with open(path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(header)
+        writer.writerows(rows)
+
+
+def read_params(folder):
+    path = os.path.join(folder, "params.yaml")
+    if not os.path.exists(path):
+        return {}
+    with open(path) as f:
+        return yaml.safe_load(f) or {}
+
+
+def recording_folders(run_dir):
+    return sorted(root for root, _, files in os.walk(run_dir) if "episode.csv" in files)
+
+
+def folder_info(folder):
+    _, rows = read_csv(os.path.join(folder, "episode.csv"))
+    params = read_params(folder)
+    legacy = params.get("time_unit") != "ns"
+    first = None
+    if rows:
+        t = int(float(rows[0][0]))
+        first = t // LEGACY_SECS_SCALE * 10**9 + t % LEGACY_SECS_SCALE if legacy else t
+    return {
+        "folder": folder,
+        "namespace": params.get("namespace", ""),
+        "legacy_time": legacy,
+        "first_time": first,
+        "episodes": sorted({int(r[1]) for r in rows if len(r) > 1 and r[1] != ""}),
+    }
+
+
+def plan_repair(run_dir):
+    """{folder: info + 'keep' (episode ids to keep)} following the rule above."""
+    infos = [folder_info(f) for f in recording_folders(run_dir)]
+    by_namespace = {}
+    for info in infos:
+        by_namespace.setdefault(info["namespace"], []).append(info)
+
+    for group in by_namespace.values():
+        group.sort(key=lambda i: (i["first_time"] is None, i["first_time"] or 0, i["folder"]))
+        for info, nxt in zip(group, group[1:] + [None]):
+            later = set(nxt["episodes"]) if nxt else set()
+            info["keep"] = [e for e in info["episodes"] if e not in later]
+    return {info["folder"]: info for info in infos}
+
+
+def repair_folder(folder, info):
+    """Rewrite the CSVs of one (copied) recording folder in place."""
+    keep = set(info["keep"])
+    header, rows = read_csv(os.path.join(folder, "episode.csv"))
+    time_col = header.index("time")
+    episode_col = header.index("episode")
+    kept_times = {r[time_col] for r in rows if r[episode_col] != "" and int(r[episode_col]) in keep}
+    n_episode_rows = len(rows)
+
+    counts = {}
+    for name in sorted(os.listdir(folder)):
+        if not name.endswith(".csv"):
+            continue
+        path = os.path.join(folder, name)
+        header, rows = read_csv(path)
+        before = len(rows)
+
+        if name == "start_goal.csv":
+            col = header.index("episode")
+            rows = [r for r in rows if r[col] != "" and int(r[col]) in keep]
+        elif "time" in header:
+            col = header.index("time")
+            rows = [r for r in rows if r[col] in kept_times]
+        elif before == n_episode_rows:
+            pass  # no time column; nothing to match on
+        counts[name] = (before, len(rows))
+
+        if info["legacy_time"]:
+            for column in TIME_COLUMNS:
+                if column in header:
+                    col = header.index(column)
+                    for r in rows:
+                        if col < len(r):
+                            r[col] = legacy_to_ns(r[col])
+        write_csv(path, header, rows)
+
+    if info["legacy_time"]:
+        params = read_params(folder)
+        params["time_unit"] = "ns"
+        with open(os.path.join(folder, "params.yaml"), "w") as f:
+            yaml.dump(params, f)
+    return counts
+
+
+def repair(run_dir, dry_run=False, out_dir=None):
+    run_dir = os.path.normpath(run_dir)
+    plan = plan_repair(run_dir)
+    report = {}
+    out_dir = out_dir or run_dir + "_repaired"
+
+    if not dry_run:
+        if os.path.exists(out_dir):
+            raise SystemExit("{} exists; remove it or choose another output".format(out_dir))
+        shutil.copytree(run_dir, out_dir)
+
+    for folder, info in sorted(plan.items()):
+        rel = os.path.relpath(folder, run_dir)
+        entry = {
+            "namespace": info["namespace"],
+            "legacy_time": info["legacy_time"],
+            "episodes": info["episodes"],
+            "keep": info["keep"],
+            "drop": [e for e in info["episodes"] if e not in info["keep"]],
+        }
+        if not dry_run:
+            entry["rows"] = {k: "{} -> {}".format(*v) for k, v in repair_folder(os.path.join(out_dir, rel), info).items()}
+        report[rel] = entry
+    return report
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("run_dir")
+    parser.add_argument("--dry-run", action="store_true", help="only print what would change")
+    parser.add_argument("--out", default=None, help="output folder (default: RUN_DIR_repaired)")
+    args = parser.parse_args()
+
+    report = repair(args.run_dir, args.dry_run, args.out)
+    print(yaml.safe_dump(report, default_flow_style=None, sort_keys=False))
+
+
+if __name__ == "__main__":
+    main()

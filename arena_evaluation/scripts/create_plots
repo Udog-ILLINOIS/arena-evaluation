@@ -267,7 +267,8 @@ class EpisodeArrayValuePlotter:
     def resize_time(row, key_reference, step_size):
         time_null = row["time"][0]
 
-        row["time"] = list(map(lambda x: int((x - time_null) / 10e8), row["time"]))
+        # metrics store row times in seconds
+        row["time"] = list(map(lambda x: round(x - time_null, 3), row["time"]))
         row["time"] = row["time"][0:len(row[key_reference])]
 
         row["time"] = row["time"][0::step_size]
